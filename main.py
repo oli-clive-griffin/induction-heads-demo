@@ -15,7 +15,7 @@ import PIL.Image
 
 #%%
 
-device = "cpu"
+device = "mps"
 
 cache = {}
 
@@ -98,7 +98,7 @@ class Model(nn.Module):
         target_one_hot = F.one_hot(target, num_classes=self.d_vocab).float()
         loss = (
             einops.reduce(-target_one_hot * pred_log_probs, 'b s v -> b s', 'sum')
-            * (~(mask.bool()))
+            # * (~(mask.bool()))
         ).mean()
         return loss
 
@@ -113,7 +113,6 @@ class Model(nn.Module):
         pe[:, 0::2] = torch.sin(pos * denom)
         pe[:, 1::2] = torch.cos(pos * denom)
         return pe.to(device)
-
 
 #%%
 
@@ -134,12 +133,13 @@ class Trainer:
             loss.backward()
             print(f"Epoch {e}, loss: {loss.item()}")
             optimizer.step()
-            # wandb.log({"loss": loss}, self.step)
-            attn_pattern_1 = self.model.attn1.attn_pattern[0].detach().numpy()
+            attn_pattern_1 = self.model.attn1.attn_pattern[0].detach().cpu().numpy()
             attn_pattern_1_as_img = PIL.Image.fromarray(wandb.Image.to_uint8(attn_pattern_1))
-            attn_pattern_2 = self.model.attn2.attn_pattern[0].detach().numpy()
+            attn_pattern_2 = self.model.attn2.attn_pattern[0].detach().cpu().numpy()
             attn_pattern_2_as_img = PIL.Image.fromarray(wandb.Image.to_uint8(attn_pattern_2))
-            wandb.log({"attn_pattern_1": wandb.Image(attn_pattern_1_as_img), "attn_pattern_2": wandb.Image(attn_pattern_2_as_img)})
+            wandb.log({"loss": loss}, self.step)
+            if e % 50 == 0:
+                wandb.log({"attn_pattern_1": wandb.Image(attn_pattern_1_as_img), "attn_pattern_2": wandb.Image(attn_pattern_2_as_img)})
             self.step += 1
 
     def create_example(self):
@@ -166,13 +166,42 @@ d_head = 64
 model = Model(d_model=d_model, d_vocab=d_vocab, d_head=d_head).to(device)
 wandb.init(project="trying-to-find-induction-heads")
 trainer = Trainer(batch_size=256, seq_len_limit=128, model=model)
-trainer.train(10_000)
+trainer.train(1000)
 wandb.finish()
 
 
 # %%
+pos_enc = model.positional_encoding(seq_len=127)
+
+QK = model.attn1.W_Q.weight.T @ model.attn1.W_K.weight
 
 # %%
+
+def try_pair(a, b):
+    x = einops.einsum(QK, pos_enc[b], ' m n, n -> m')
+    return einops.einsum(x, pos_enc[a], 'm, m ->').detach().cpu().numpy()
+
+#%%
+import matplotlib.pyplot as plt
+
+scores = [try_pair(a, a+1) for a in range(126)]
+plt.plot(scores)
+#%%
+pos_enc.shape
+
+# %%
+from matplotlib.pyplot import imshow
+a = (pos_enc @ QK @ pos_enc.T)
+mask = torch.ones_like(a)
+mask = torch.tril(mask, diagonal=0)
+#%%
+mask[:3, :3]
+#%%
+
+x = a * mask
+imshow(x.detach().cpu().numpy())
+#%%
+
 out = model.forward(
     torch.tensor([[100, 200, 300, 400, 500, 600, 500, 500, 500]]).to(device),
     True
